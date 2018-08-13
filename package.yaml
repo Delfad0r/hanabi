@@ -21,28 +21,33 @@ description:         Please see the README on GitHub at <https://github.com/gith
 
 dependencies:
 - base >= 4.7 && < 5
+- ansi-terminal
+- containers
+- data-ordlist
+- lens
+- mtl
+- monad-loops
+- pretty-terminal
 
 library:
   source-dirs: src
+  ghc-options:
+  - -Wno-missing-fields
 
 executables:
   hanabi-exe:
     main:                Main.hs
     source-dirs:         app
     ghc-options:
-    - -threaded
-    - -rtsopts
-    - -with-rtsopts=-N
+    - -O2
     dependencies:
     - hanabi
+    - random-shuffle
 
 tests:
   hanabi-test:
     main:                Spec.hs
     source-dirs:         test
-    ghc-options:
-    - -threaded
-    - -rtsopts
-    - -with-rtsopts=-N
+    ghc-options: []
     dependencies:
     - hanabi
