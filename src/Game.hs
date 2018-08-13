@@ -1,6 +1,4 @@
-{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE DuplicateRecordFields #-}
@@ -63,18 +61,18 @@ processTurn :: (Strategy s) => LoggedState (GameState s) () -> LoggedState (Game
 processTurn tr = do
     res <- runExceptT $ do
         i <- use currentPlayer
-        a <- lift $ (gets $ toAppearance i) >>= zoom (players . idx i . strategy) . playTurn
+        a <- lift $ gets (toAppearance i) >>= zoom (players . idx i . strategy) . playTurn
         case a of
             PlayAction {..} -> do
-                mc <- preuse $ players . idx i . hand . (ix $ a ^?! cardPos)
+                mc <- preuse $ players . idx i . hand . ix (a ^?! cardPos)
                 case mc of
                     Nothing -> throwError "Invalid card position"
                     Just c -> do
                         players . idx i . hand %= deleteAt (a ^?! cardPos)
-                        s <- uses (board . (idx $ c ^. color)) $ (== c ^. number) . succ
+                        s <- uses (board . idx (c ^. color)) $ (== c ^. number) . succ
                         if s then do
-                            board . (idx $ c ^. color) %= succ
-                            when (c ^. number == 5) $ numHints %= (min maxHints) . succ
+                            board . idx (c ^. color) %= succ
+                            when (c ^. number == 5) $ numHints %= min maxHints . succ
                         else do
                             discardPile %= (c :)
                             numLives -= 1
@@ -87,13 +85,13 @@ processTurn tr = do
                         whenM (uses board $ all (== 5)) $ throwError "Victory"
                         drawCard i
             DiscardAction {..} -> do
-                mc <- preuse $ players . idx i . hand . (ix $ a ^?! cardPos)
+                mc <- preuse $ players . idx i . hand . ix (a ^?! cardPos)
                 case mc of
                     Nothing -> throwError "Invalid card position"
                     Just c -> do
                         players . idx i . hand %= deleteAt (a ^?! cardPos)
                         discardPile %= (c :)
-                        numHints %= (min maxHints) . succ
+                        numHints %= min maxHints . succ
                         lift . forM_ [0 .. numPlayers - 1] . dispatchEvent
                             $ DiscardEvent {}
                             & playerId .~ i
@@ -125,7 +123,7 @@ processTurn tr = do
 
 
 dispatchEvent :: (Strategy s) => Event -> PlayerId -> LoggedState (GameState s) ()
-dispatchEvent e i = (gets $ toAppearance i) >>= zoom (players . idx i . strategy) . processEvent e
+dispatchEvent e i = gets (toAppearance i) >>= zoom (players . idx i . strategy) . processEvent e
 
 
 drawCard :: (Strategy s) => PlayerId -> ExceptT String (LoggedState (GameState s)) ()

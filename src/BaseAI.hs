@@ -64,7 +64,7 @@ instance Strategy BaseAI where
     initStrategy a =
         BaseAI {}
         & game .~ a
-        & publicKnowledge .~ (initPublicKnowledge a)
+        & publicKnowledge .~ initPublicKnowledge a
     
     processEvent e a = do
         publicKnowledge %= updatePublicKnowledge a e
@@ -77,7 +77,7 @@ instance Strategy BaseAI where
         let k = ai ^. publicKnowledge
             playableCards = map fst . filter (all (isPlayable (a ^. board)) . (^. possibleCards) . snd) . zip [0 ..] $ k ^. cardInfo . idx (a ^. myId)
             trashValueOfCards = [((ci ^. cardTag == Trash, i), i) | i <- [0 .. a ^. myHandSize - 1], let ci = k ^. cardInfo . idx (a ^. myId) . idx i]
-        logMessage . unlines . map show . zip [0 ..] $ k ^. cardInfo . idx (a ^. myId)
+        logMessage . unlines . zipWith (curry show) [0 ..] $ k ^. cardInfo . idx (a ^. myId)
         case playableCards of
             (i : _) -> do
                 u <- use (publicKnowledge . cardInfo . idx (a ^. myId)) 
@@ -96,13 +96,13 @@ instance Strategy BaseAI where
 initPublicKnowledge :: GameAppearance -> PublicKnowledge
 initPublicKnowledge a =
     PublicKnowledge {}
-    & cardInfo .~ (replicate numPlayers . replicate handSize $ CardInfo {} & possibleCards .~ (nubSort $ a ^. fullDeck) & cardTag .~ NoTag & lastHinted .~ 0)
+    & cardInfo .~ (replicate numPlayers . replicate handSize $ CardInfo {} & possibleCards .~ nubSort (a ^. fullDeck) & cardTag .~ NoTag & lastHinted .~ 0)
     & virtualBoard .~ (a ^. board)
     & currTurn .~ 0
 
 
 isValidHint :: Hint -> [Card] -> Bool
-isValidHint h = not . null . filter (matchHintCard h)
+isValidHint h = any (matchHintCard h)
 
 
 getNumFromHintedCards :: Hint -> [Int] ->  Int
@@ -122,20 +122,19 @@ getNumFromHint e = getNumFromHintedCards (e ^?! hint) (e ^?! hintedCards)
 giveHintMod16 :: BaseAI -> Int -> Maybe Action
 --assumes numPlayers == 5, handSize == 4
 giveHintMod16 ai n = do
-        let l = filter (\h -> isValidHint h c && getNumFromHintedCards h (getHintedCards h c) == j) $ allHints
+        let l = filter (\h -> isValidHint h c && getNumFromHintedCards h (getHintedCards h c) == j) allHints
         listToMaybe l
         return
             $ HintAction {}
             & targetId .~ i
-            & hint .~ (
+            & hint .~
                 maximumBy (comparing $ \h -> ratePublicKnowledge . updatePublicKnowledge (ai ^. game) (
                     HintEvent {}
                     & playerId .~ (ai ^. game . myId)
                     & targetId .~ i
                     & hint .~ h
-                    & hintedCards .~ (getHintedCards h c)
+                    & hintedCards .~ getHintedCards h c
                 ) $ ai ^. publicKnowledge) l
-            )
     where
         (i, j) = ((n `mod` 16) `divMod` 4) & _1 %~ (nextPlayerN ?? 1 + ai ^. game . myId)
         c = ai ^. game . otherHands . idx i
@@ -194,14 +193,14 @@ updatePublicKnowledge a e k =
             . (zip <*> tail)
             . iterate (imap $ \c n -> if [Card {} & number .~ n + 1 & color .~ c] `elem` (k ^.. cardInfo . traversed . traversed . possibleCards) then n + 1 else n)
         & virtualBoard %~ M.unionWith max (a ^. board)
-    updatePublicKnowledgeWithEvent e@(DiscardEvent {..}) = k & currTurn %~ succ & cardInfo . idx (e ^. playerId) %~ deleteAt (e ^?! cardPos)
-    updatePublicKnowledgeWithEvent e@(PlayEvent {..}) = k & currTurn %~ succ & cardInfo . idx (e ^. playerId) %~ deleteAt (e ^?! cardPos)
-    updatePublicKnowledgeWithEvent e@(HintEvent {..}) =
+    updatePublicKnowledgeWithEvent e@DiscardEvent {..} = k & currTurn %~ succ & cardInfo . idx (e ^. playerId) %~ deleteAt (e ^?! cardPos)
+    updatePublicKnowledgeWithEvent e@PlayEvent {..} = k & currTurn %~ succ & cardInfo . idx (e ^. playerId) %~ deleteAt (e ^?! cardPos)
+    updatePublicKnowledgeWithEvent e@HintEvent {..} =
         k
         & currTurn %~ succ
         & cardInfo .~ map updateOnePlayer [0 .. numPlayers - 1]
         & cardInfo . idx (e ^?! targetId) . elements (`elem` e ^?! hintedCards) . possibleCards %~ filter (matchHintCard $ e ^?! hint)
-        & cardInfo . idx (e ^?! targetId) . elements (not . (`elem` e ^?! hintedCards)) . possibleCards %~ filter (not . (matchHintCard $ e ^?! hint))
+        & cardInfo . idx (e ^?! targetId) . elements (not . (`elem` e ^?! hintedCards)) . possibleCards %~ filter (not . matchHintCard (e ^?! hint))
         where
             n = getNumFromHint e
             updateOnePlayer i
@@ -226,14 +225,14 @@ updatePublicKnowledge a e k =
                     cardsForHint = selectCardsForHint k i
             setPlayable c ci = ci & possibleCards .~ [nextPlayableCard (k ^. virtualBoard) c]
             setNotPlayable ci = ci & possibleCards %~ (\\ map (nextPlayableCard $ k ^. virtualBoard) colors)
-            setTrash ci = ci & possibleCards %~ (intersect $ M.foldMapWithKey (\c n -> [Card {} & number .~ m & color .~ c | m <- [1 .. n]]) (k ^. virtualBoard)) & cardTag .~ Trash
+            setTrash ci = ci & possibleCards %~ intersect (M.foldMapWithKey (\c n -> [Card {} & number .~ m & color .~ c | m <- [1 .. n]]) (k ^. virtualBoard)) & cardTag .~ Trash
             setNotTrash ci = ci & possibleCards %~ (\\ M.foldMapWithKey (\c n -> [Card {} & number .~ m & color .~ c | m <- [1 .. n]]) (k ^. virtualBoard))
             cols = M.keys . M.filter (< 5) $ k ^. virtualBoard
             colNum = length cols
             numPlayable = cardsForHintNumPlayable !! colNum
             numTrash = cardsForHintNumTrash !! colNum
-    updatePublicKnowledgeWithEvent e@(DrawEvent {..}) = updatePublicKnowledge a (YouDrawEvent {} & playerId .~ (e ^. playerId)) k
-    updatePublicKnowledgeWithEvent e@(YouDrawEvent {..}) = k & cardInfo . idx (e ^. playerId) %~ ((CardInfo {} & possibleCards .~ computeInvisibleCards a k & cardTag .~ NoTag & lastHinted .~ 0) :)
+    updatePublicKnowledgeWithEvent e@DrawEvent {..} = updatePublicKnowledge a (YouDrawEvent {} & playerId .~ (e ^. playerId)) k
+    updatePublicKnowledgeWithEvent e@YouDrawEvent {..} = k & cardInfo . idx (e ^. playerId) %~ ((CardInfo {} & possibleCards .~ computeInvisibleCards a k & cardTag .~ NoTag & lastHinted .~ 0) :)
 
 
 isPlayable :: Board -> Card -> Bool
@@ -253,7 +252,7 @@ computeInvisibleCards a k = nubSort $ (a ^. fullDeck \\ a ^. discardPile) \\ (ma
 
 
 computeUnplayableHighCards :: GameAppearance -> [Card]
-computeUnplayableHighCards a = nubSort . concatMap (\c -> [c & number .~ n | n <- [c ^. number .. 5]]) $ (nubSort $ a ^. fullDeck) `minus` (nubSort $ (a ^. fullDeck) `minus` nubSort (a ^. discardPile))
+computeUnplayableHighCards a = nubSort . concatMap (\c -> [c & number .~ n | n <- [c ^. number .. 5]]) $ nubSort (a ^. fullDeck) `minus` nubSort ((a ^. fullDeck) `minus` nubSort (a ^. discardPile))
 
 
 allHints :: [Hint]
@@ -261,7 +260,7 @@ allHints = map ColorHint colors ++ map NumberHint [1 .. numNumbers]
 
 
 fromBase2 :: [Bool] -> Int
-fromBase2 = foldr (flip $ (+) . (* 2)) 0 . map fromEnum
+fromBase2 = foldr (flip ((+) . (* 2)) . fromEnum) 0
 
 toBase2 :: Int -> [Bool]
 toBase2 = map toEnum . unfoldr (Just . swap . (`divMod` 2))

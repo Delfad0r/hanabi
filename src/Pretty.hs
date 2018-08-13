@@ -70,7 +70,7 @@ prettyPrintGameState s = do
     putStr . prettyShow $ s ^. board
     -- Hints, Lives, Deck
     C.setCursorPosition 6 6
-    putStr $ (show $ s ^. numHints) ++ "H " ++ (show $ s ^. numLives) ++ "L"
+    putStr $ show (s ^. numHints) ++ "H " ++ show (s ^. numLives) ++ "L"
     C.cursorForward 3
     putStr . reverse . take 3 . ('D' :) . (++ " ") . reverse . show . length $ s ^. deck
     -- Discard Pile

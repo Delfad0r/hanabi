@@ -27,7 +27,7 @@ getHintedCards h = map fst . filter (matchHintCard h . snd) . zip [0 ..]
 deleteAt :: Int -> [a] -> [a]
 deleteAt i = (++) <$> take i <*> drop (i + 1)
 
-whenM :: (Monad m) => (m Bool) -> m () -> m ()
+whenM :: (Monad m) => m Bool -> m () -> m ()
 whenM cond t = cond >>= (`when` t)
 
 idx :: (Ixed t, Functor f) => Index t -> Over (->) f t t (IxValue t) (IxValue t)
