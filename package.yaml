@@ -27,6 +27,7 @@ dependencies:
 - lens
 - mtl
 - monad-loops
+- parallel
 - pretty-terminal
 
 library:
@@ -35,11 +36,21 @@ library:
   - -Wno-missing-fields
 
 executables:
-  hanabi-exe:
-    main:                Main.hs
-    source-dirs:         app
+  show-game-exe:
+    main:                ShowGame.hs
+    source-dirs:         app/ShowGame
     ghc-options:
     - -O2
+    dependencies:
+    - hanabi
+    - random-shuffle
+  average-exe:
+    main:                Average.hs
+    source-dirs:         app/Average
+    ghc-options:
+    - -O2
+    - -threaded
+    - -with-rtsopts=-N
     dependencies:
     - hanabi
     - random-shuffle

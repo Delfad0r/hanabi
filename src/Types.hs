@@ -45,8 +45,8 @@ instance Read Color where
 
 data Card =
     Card {
-        _number :: Int,
-        _color :: Color
+        _color :: Color,
+        _number :: Int
     }
     deriving (Eq, Ord)
 makeFieldsNoPrefix ''Card;

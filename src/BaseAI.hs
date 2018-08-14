@@ -25,8 +25,6 @@ import Data.Tuple
 import Types
 import Utility
 
-import Debug.Trace
-
 data CardTag = NoTag | Trash
     deriving (Eq, Show)
 
@@ -76,19 +74,22 @@ instance Strategy BaseAI where
         ai <- get
         let k = ai ^. publicKnowledge
             playableCards = map fst . filter (all (isPlayable (a ^. board)) . (^. possibleCards) . snd) . zip [0 ..] $ k ^. cardInfo . idx (a ^. myId)
-            trashValueOfCards = [((ci ^. cardTag == Trash, i), i) | i <- [0 .. a ^. myHandSize - 1], let ci = k ^. cardInfo . idx (a ^. myId) . idx i]
+            trashValue ci
+                | ci ^. cardTag == Trash = 0
+                | otherwise = case ci ^. possibleCards of
+                    [c] -> snd $ rateTrashValue a k c
+                    cs -> sum (map (fst . rateTrashValue a k) cs) / genericLength cs
+            trashValueOfCards = zip (k ^.. cardInfo . idx (a ^. myId) . traversed . to trashValue) [0 ..]
         logMessage . unlines . zipWith (curry show) [0 ..] $ k ^. cardInfo . idx (a ^. myId)
         case playableCards of
-            (i : _) -> do
-                u <- use (publicKnowledge . cardInfo . idx (a ^. myId)) 
-                return $ PlayAction {} & cardPos .~ i
+            (i : _) -> return $ PlayAction {} & cardPos .~ i
             _ -> do
                 let h = giveHintMod16 ai . sum . map (encodeHand k a) $ [0 .. numPlayers - 1] \\ [a ^. myId]
                 if a ^. numHints > 0 && isJust h
                 then return $ fromJust h
-                else do 
-                    u <- use (publicKnowledge . cardInfo . idx (a ^. myId)) 
-                    return $ DiscardAction {} & cardPos .~ snd (maximum trashValueOfCards)
+                else do
+                    logMessage $ show trashValueOfCards
+                    return $ DiscardAction {} & cardPos .~ snd (minimum trashValueOfCards)
                 
                     
 
@@ -144,7 +145,7 @@ encodeHand :: PublicKnowledge -> GameAppearance -> PlayerId -> Int
 encodeHand k a i = 
     case listToMaybe . filter (isPlayable (k ^. virtualBoard) . snd) $ zip [0 .. numPlayable - 1] cardsForHint of
         Just (j, c) -> colNum * j + fromJust (elemIndex (c ^. color) cols)
-        Nothing -> colNum * numPlayable + fromBase2 (map (isTrash $ k ^. virtualBoard) $ take numTrash cardsForHint)
+        Nothing -> colNum * numPlayable + fromBase2 (map (isTrash (k ^. virtualBoard) a) $ take numTrash cardsForHint)
     where
         cols = M.keys . M.filter (< 5) $ k ^. virtualBoard
         colNum = length cols
@@ -164,6 +165,21 @@ ratePublicKnowledge :: PublicKnowledge -> Double
 ratePublicKnowledge _ = 0
 
 
+rateTrashValue :: GameAppearance -> PublicKnowledge -> Card -> (Double, Double)
+rateTrashValue a k c
+    | isTrash (a ^. board) a c = (0, 0)
+    | isTrash (k ^. virtualBoard) a c = (0, singleValue)
+    | otherwise = (fromIntegral (highestScore + 1 - (c ^. number)) / fromIntegral ((1 + visibleBonus + veryVisibleBonus) * 7 ^ (remaining - 1)), singleValue)
+    where
+        singleValue = fromIntegral (highestScore + 1 - (c ^. number)) / fromIntegral (1 + veryVisibleBonus)
+        filterMyColor = filter $ (== c ^. color) . (^. color)
+        notDiscarded = filterMyColor (a ^. fullDeck) `minus` sort (filterMyColor $ a ^. discardPile)
+        remaining = length $ filter (== c) notDiscarded
+        highestScore = length . takeWhile (== -1) . (zipWith (-) <*> tail) . (0 :) . nub $ map (^. number) notDiscarded
+        visibleBonus = length $ a ^.. otherHands . traversed . traversed . filtered (== c)
+        veryVisibleBonus = length $ deleteAt (a ^. myId) (k ^. cardInfo) ^.. traversed . traversed . possibleCards . filtered (== [c])
+
+
 updatePublicKnowledge :: GameAppearance -> Event -> PublicKnowledge -> PublicKnowledge
 updatePublicKnowledge a e k =
         updatePublicKnowledgeWithEvent e
@@ -172,19 +188,18 @@ updatePublicKnowledge a e k =
         & knownCardsNotTrash
         & findTrashCards
     where
-    unplayableHighCards = computeUnplayableHighCards a
     deleteVisibleCards k = k & cardInfo . mapped . mapped . possibleCards %~ (\case {[c] -> [c]; cs -> intersect cs $ computeInvisibleCards a k})
     knownCardsNotTrash k =
         k
         & cardInfo . mapped . mapped
             %~ (\ci -> case ci ^. possibleCards of {
-                [c] -> ci & cardTag .~ (if isTrash (a ^. board) c || c `elem` unplayableHighCards then Trash else NoTag);
+                [c] -> ci & cardTag .~ (if isTrash (a ^. board) a c then Trash else NoTag);
                 _ -> ci
             })
     findTrashCards k =
         k
         & cardInfo . mapped . mapped
-            %~ (\ci -> let pc = ci ^. possibleCards in if length pc > 1 && all (liftA2 (||) (isTrash $ k ^. virtualBoard) (`elem` unplayableHighCards)) pc then ci & cardTag .~ Trash else ci)
+            %~ (\ci -> let pc = ci ^. possibleCards in if length pc > 1 && all (isTrash (k ^. virtualBoard) a) pc then ci & cardTag .~ Trash else ci)
     updateVirtualBoard k = k
         & virtualBoard
             %~ fst
@@ -224,9 +239,9 @@ updatePublicKnowledge a e k =
                         | otherwise = encodeHand k a i
                     cardsForHint = selectCardsForHint k i
             setPlayable c ci = ci & possibleCards .~ [nextPlayableCard (k ^. virtualBoard) c]
-            setNotPlayable ci = ci & possibleCards %~ (\\ map (nextPlayableCard $ k ^. virtualBoard) colors)
-            setTrash ci = ci & possibleCards %~ intersect (M.foldMapWithKey (\c n -> [Card {} & number .~ m & color .~ c | m <- [1 .. n]]) (k ^. virtualBoard)) & cardTag .~ Trash
-            setNotTrash ci = ci & possibleCards %~ (\\ M.foldMapWithKey (\c n -> [Card {} & number .~ m & color .~ c | m <- [1 .. n]]) (k ^. virtualBoard))
+            setNotPlayable ci = ci & possibleCards %~ (`minus` map (nextPlayableCard $ k ^. virtualBoard) colors)
+            setTrash ci = ci & possibleCards %~ isect (M.foldMapWithKey (\c n -> [Card {} & number .~ m & color .~ c | m <- [1 .. n]]) (k ^. virtualBoard)) & cardTag .~ Trash
+            setNotTrash ci = ci & possibleCards %~ (`minus` M.foldMapWithKey (\c n -> [Card {} & number .~ m & color .~ c | m <- [1 .. n]]) (k ^. virtualBoard))
             cols = M.keys . M.filter (< 5) $ k ^. virtualBoard
             colNum = length cols
             numPlayable = cardsForHintNumPlayable !! colNum
@@ -243,16 +258,16 @@ nextPlayableCard :: Board -> Color -> Card
 nextPlayableCard b c = Card {} & number .~ 1 + (b ^. idx c) & color .~ c
 
 
-isTrash :: Board -> Card -> Bool
-isTrash b c = c ^. number <= b ^. idx (c ^. color)
+isTrash :: Board -> GameAppearance -> Card -> Bool
+isTrash b a c = c ^. number <= b ^. idx (c ^. color) || c `member` computeUnplayableHighCards a
 
 
 computeInvisibleCards :: GameAppearance -> PublicKnowledge -> [Card]
-computeInvisibleCards a k = nubSort $ (a ^. fullDeck \\ a ^. discardPile) \\ (map head . filter ((== 1) . length)  $ k ^.. cardInfo . traversed . traversed . possibleCards)
+computeInvisibleCards a k = nub $ ((a ^. fullDeck) `minus` sort (a ^. discardPile)) `minus` (map head . filter ((== 1) . length)  $ k ^.. cardInfo . traversed . traversed . possibleCards)
 
 
 computeUnplayableHighCards :: GameAppearance -> [Card]
-computeUnplayableHighCards a = nubSort . concatMap (\c -> [c & number .~ n | n <- [c ^. number .. 5]]) $ nubSort (a ^. fullDeck) `minus` nubSort ((a ^. fullDeck) `minus` nubSort (a ^. discardPile))
+computeUnplayableHighCards a = nubSort . concatMap (\c -> [c & number .~ n | n <- [c ^. number .. 5]]) $ nub (a ^. fullDeck) `minus` nub ((a ^. fullDeck) `minus` sort (a ^. discardPile))
 
 
 allHints :: [Hint]

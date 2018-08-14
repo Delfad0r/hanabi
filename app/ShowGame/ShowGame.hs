@@ -4,6 +4,8 @@ import System.IO
 import Control.Lens
 import Control.Exception.Base
 import Control.Monad.State
+import System.Environment
+import System.Exit
 
 import Game
 import BaseAI
@@ -14,7 +16,11 @@ import Pretty
 
 main :: IO ()
 main = do
-    deck <- shuffleM standardDeck
+    args <- getArgs
+    deck <- case args of
+        [d] -> return $ read d
+        [] -> shuffleM standardDeck
+        _ -> exitWith $ ExitFailure 1
     hSetBuffering stdin NoBuffering
     let tr = get >>= \s -> tell (prettyPrintGameState s >> getLine >> return ())
     let (s, w) = runWriter (playTracedGame tr deck :: Logger (GameState BaseAI))
@@ -27,7 +33,7 @@ main = do
     print $ s ^. board
     print . sum $ s ^. board
     print $ s ^. players . idx 0 . strategy . publicKnowledge . virtualBoard
-    print $ s ^. numLives
+    putStrLn $ s ^. gameOverBecause
     assert (s ^. numLives == 3) $ return ()
 
 {- DISASTER
