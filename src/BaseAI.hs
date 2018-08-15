@@ -35,7 +35,7 @@ data CardInfo =
         _cardTag :: CardTag,
         _lastHinted :: Int
     }
-    deriving (Show)
+    deriving (Eq, Show)
 makeFieldsNoPrefix ''CardInfo
 
 
@@ -169,21 +169,21 @@ rateTrashValue :: GameAppearance -> PublicKnowledge -> Card -> (Double, Double)
 rateTrashValue a k c
     | isTrash (a ^. board) a c = (0, 0)
     | isTrash (k ^. virtualBoard) a c = (0, singleValue)
-    | otherwise = (fromIntegral (highestScore + 1 - (c ^. number)) / fromIntegral ((1 + visibleBonus + veryVisibleBonus) * 7 ^ (remaining - 1)), singleValue)
+    | otherwise = (fromIntegral (highestScore + 1 - (c ^. number)) / fromIntegral ((1 + visibleBonus + 2 * veryVisibleBonus) * 7 ^ (remaining - 1)), singleValue)
     where
-        singleValue = fromIntegral (highestScore + 1 - (c ^. number)) / fromIntegral (1 + veryVisibleBonus)
+        singleValue = fromIntegral (highestScore + 1 - (c ^. number)) / (1 + 2 * fromIntegral veryVisibleBonus + fromIntegral ((remaining - 1) * (k ^. currTurn)) / 20)
         filterMyColor = filter $ (== c ^. color) . (^. color)
         notDiscarded = filterMyColor (a ^. fullDeck) `minus` sort (filterMyColor $ a ^. discardPile)
         remaining = length $ filter (== c) notDiscarded
         highestScore = length . takeWhile (== -1) . (zipWith (-) <*> tail) . (0 :) . nub $ map (^. number) notDiscarded
         visibleBonus = length $ a ^.. otherHands . traversed . traversed . filtered (== c)
-        veryVisibleBonus = length $ deleteAt (a ^. myId) (k ^. cardInfo) ^.. traversed . traversed . possibleCards . filtered (== [c])
+        veryVisibleBonus = length $ k ^.. cardInfo . traversed . traversed . possibleCards . filtered (== [c])
 
 
 updatePublicKnowledge :: GameAppearance -> Event -> PublicKnowledge -> PublicKnowledge
 updatePublicKnowledge a e k =
         updatePublicKnowledgeWithEvent e
-        & deleteVisibleCards
+        & fst . head . filter (uncurry ((==) `on` (^. cardInfo))) . (zip <*> tail) . iterate deleteVisibleCards
         & updateVirtualBoard
         & knownCardsNotTrash
         & findTrashCards

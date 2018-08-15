@@ -19,7 +19,7 @@ playOneGame = do
 
 getAverage :: Int -> IO Double
 getAverage nGames = do
-    scores <- (`using` parList rdeepseq) <$> replicateM nGames playOneGame
+    scores <- (`using` parListChunk 10 rdeepseq) <$> replicateM nGames playOneGame
     return $ fromIntegral (sum scores) / fromIntegral nGames
 
 main :: IO ()
