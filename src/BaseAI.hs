@@ -7,13 +7,17 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TupleSections #-}
 
 module BaseAI where
 
+
 import Control.Applicative
-import Control.Lens
+import Control.Arrow
+import Control.Lens hiding (has)
 import Control.Monad
 import Control.Monad.State
+import Data.Foldable (fold)
 import Data.Function
 import Data.List hiding (nub)
 import Data.List.Ordered hiding (sort, sortOn)
@@ -21,9 +25,12 @@ import qualified Data.Map.Strict as M
 import Data.Maybe
 import Data.Ord
 import Data.Tuple
+import qualified Data.Vector as V
 
+import ListFreq
 import Types
 import Utility
+
 
 data CardTag = NoTag | Trash
     deriving (Eq, Show)
@@ -73,16 +80,20 @@ instance Strategy BaseAI where
         game .= a
         ai <- get
         let k = ai ^. publicKnowledge
-            playableCards = map fst . filter (all (isPlayable (a ^. board)) . (^. possibleCards) . snd) . zip [0 ..] $ k ^. cardInfo . idx (a ^. myId)
+            privateCardInfo = computePrivateCardInfo a k
+            k' = k & cardInfo . idx (a ^. myId) .~ privateCardInfo
+            playableCards = reverse . map fst . sortOn ((\case [c] -> k ^. virtualBoard . idx (c ^. color) - c ^. number; _ -> -10) . (^. possibleCards) . snd) . filter (all (isPlayable $ a ^. board) . (^. possibleCards) . snd) $ zip [0 ..] privateCardInfo
             trashValue ci
                 | ci ^. cardTag == Trash = 0
                 | otherwise = case ci ^. possibleCards of
-                    [c] -> snd $ rateTrashValue a k c
-                    cs -> sum (map (fst . rateTrashValue a k) cs) / genericLength cs
-            trashValueOfCards = zip (k ^.. cardInfo . idx (a ^. myId) . traversed . to trashValue) [0 ..]
+                    [c] -> snd $ rateTrashValue a k' c
+                    cs -> sum (map (fst . rateTrashValue a k') cs) / genericLength cs
+            trashValueOfCards = zip (map trashValue privateCardInfo) [0 ..]
         logMessage . unlines . zipWith (curry show) [0 ..] $ k ^. cardInfo . idx (a ^. myId)
+        logMessage . unlines . zipWith (curry show) [0 ..] $ privateCardInfo
         case playableCards of
-            (i : _) -> return $ PlayAction {} & cardPos .~ i
+            (i : _) -> do
+                return $ PlayAction {} & cardPos .~ i
             _ -> do
                 let h = giveHintMod16 ai . sum . map (encodeHand k a) $ [0 .. numPlayers - 1] \\ [a ^. myId]
                 if a ^. numHints > 0 && isJust h
@@ -91,8 +102,6 @@ instance Strategy BaseAI where
                     logMessage $ show trashValueOfCards
                     return $ DiscardAction {} & cardPos .~ snd (minimum trashValueOfCards)
                 
-                    
-
 
 initPublicKnowledge :: GameAppearance -> PublicKnowledge
 initPublicKnowledge a =
@@ -145,13 +154,14 @@ encodeHand :: PublicKnowledge -> GameAppearance -> PlayerId -> Int
 encodeHand k a i = 
     case listToMaybe . filter (isPlayable (k ^. virtualBoard) . snd) $ zip [0 .. numPlayable - 1] cardsForHint of
         Just (j, c) -> colNum * j + fromJust (elemIndex (c ^. color) cols)
-        Nothing -> colNum * numPlayable + fromBase2 (map (isTrash (k ^. virtualBoard) a) $ take numTrash cardsForHint)
+        Nothing -> colNum * numPlayable + fromBase2 (map (has trashCards) $ take numTrash cardsForHint)
     where
         cols = M.keys . M.filter (< 5) $ k ^. virtualBoard
         colNum = length cols
         numPlayable = cardsForHintNumPlayable !! colNum
         numTrash = cardsForHintNumTrash !! colNum
         cardsForHint = map (\j -> a ^. otherHands . idx i . idx j) $ selectCardsForHint k i
+        trashCards = computeTrashCards (k ^.virtualBoard) a
 
 --                              0   1   2   3   4   5   6
 cardsForHintNumPlayable =   [   0,  4,  4,  4,  3,  2,  2]
@@ -167,11 +177,11 @@ ratePublicKnowledge _ = 0
 
 rateTrashValue :: GameAppearance -> PublicKnowledge -> Card -> (Double, Double)
 rateTrashValue a k c
-    | isTrash (a ^. board) a c = (0, 0)
-    | isTrash (k ^. virtualBoard) a c = (0, singleValue)
+    | c `member` computeTrashCards (a ^. board) a = (0, 0)
+    | c `member` computeTrashCards (k ^. virtualBoard) a = (0, singleValue)
     | otherwise = (fromIntegral (highestScore + 1 - (c ^. number)) / fromIntegral ((1 + visibleBonus + 2 * veryVisibleBonus) * 7 ^ (remaining - 1)), singleValue)
     where
-        singleValue = fromIntegral (highestScore + 1 - (c ^. number)) / (1 + 2 * fromIntegral veryVisibleBonus + fromIntegral ((remaining - 1) * (k ^. currTurn)) / 20)
+        singleValue = fromIntegral (highestScore + 1 - (c ^. number)) / (1 + 2 * fromIntegral (veryVisibleBonus - 1) + fromIntegral ((remaining - 1) * (k ^. currTurn)) / 20)
         filterMyColor = filter $ (== c ^. color) . (^. color)
         notDiscarded = filterMyColor (a ^. fullDeck) `minus` sort (filterMyColor $ a ^. discardPile)
         remaining = length $ filter (== c) notDiscarded
@@ -185,21 +195,19 @@ updatePublicKnowledge a e k =
         updatePublicKnowledgeWithEvent e
         & fst . head . filter (uncurry ((==) `on` (^. cardInfo))) . (zip <*> tail) . iterate deleteVisibleCards
         & updateVirtualBoard
-        & knownCardsNotTrash
         & findTrashCards
     where
-    deleteVisibleCards k = k & cardInfo . mapped . mapped . possibleCards %~ (\case {[c] -> [c]; cs -> intersect cs $ computeInvisibleCards a k})
-    knownCardsNotTrash k =
-        k
-        & cardInfo . mapped . mapped
-            %~ (\ci -> case ci ^. possibleCards of {
-                [c] -> ci & cardTag .~ (if isTrash (a ^. board) a c then Trash else NoTag);
-                _ -> ci
-            })
+    deleteVisibleCards k = k & cardInfo . mapped . mapped . possibleCards %~ (\case {[c] -> [c]; cs -> intersect cs . computeInvisibleCards a $ k ^. cardInfo})
     findTrashCards k =
-        k
-        & cardInfo . mapped . mapped
-            %~ (\ci -> let pc = ci ^. possibleCards in if length pc > 1 && all (isTrash (k ^. virtualBoard) a) pc then ci & cardTag .~ Trash else ci)
+        k & cardInfo . mapped . mapped
+        %~ (\ci -> case ci ^. possibleCards of {
+            [c] -> ci & cardTag .~ (if isTrash c then Trash else NoTag);
+            pc | all isVirtualTrash pc -> ci & cardTag .~ Trash;
+            _ -> ci
+        }) 
+        where
+            isTrash = memoizeCardList $ computeTrashCards (a ^. board) a
+            isVirtualTrash = memoizeCardList $ computeTrashCards (k ^. virtualBoard) a
     updateVirtualBoard k = k
         & virtualBoard
             %~ fst
@@ -247,7 +255,27 @@ updatePublicKnowledge a e k =
             numPlayable = cardsForHintNumPlayable !! colNum
             numTrash = cardsForHintNumTrash !! colNum
     updatePublicKnowledgeWithEvent e@DrawEvent {..} = updatePublicKnowledge a (YouDrawEvent {} & playerId .~ (e ^. playerId)) k
-    updatePublicKnowledgeWithEvent e@YouDrawEvent {..} = k & cardInfo . idx (e ^. playerId) %~ ((CardInfo {} & possibleCards .~ computeInvisibleCards a k & cardTag .~ NoTag & lastHinted .~ 0) :)
+    updatePublicKnowledgeWithEvent e@YouDrawEvent {..} = k & cardInfo . idx (e ^. playerId) %~ ((CardInfo {} & possibleCards .~ computeInvisibleCards a (k ^. cardInfo) & cardTag .~ NoTag & lastHinted .~ 0) :)
+
+
+cards :: [Card]
+cards = [Card {} & color .~ c & number .~ n | c <- colors, n <- [1 .. numNumbers]]
+
+
+cardToInt :: Card -> Int
+cardToInt c = (c ^. color . to fromEnum) * numNumbers + c ^. number - 1
+
+
+memoizeCardFunction :: (Card -> a) -> Card -> a
+memoizeCardFunction f = (v V.!) . cardToInt
+    where
+        v = V.accum (flip const) (V.replicate (numColors * numNumbers) undefined) $ map (cardToInt &&& f) cards
+
+
+memoizeCardList :: [Card] -> Card -> Bool
+memoizeCardList cs = (v V.!) . cardToInt
+    where
+        v = V.accum (flip const) (V.replicate (numColors * numNumbers) False) $ map ((, True) . cardToInt) cs
 
 
 isPlayable :: Board -> Card -> Bool
@@ -258,16 +286,36 @@ nextPlayableCard :: Board -> Color -> Card
 nextPlayableCard b c = Card {} & number .~ 1 + (b ^. idx c) & color .~ c
 
 
-isTrash :: Board -> GameAppearance -> Card -> Bool
-isTrash b a c = c ^. number <= b ^. idx (c ^. color) || c `member` computeUnplayableHighCards a
+computeTrashCards :: Board -> GameAppearance -> [Card]
+computeTrashCards b a = sort $ M.foldMapWithKey (\c n -> [Card {} & number .~ m & color .~ c | m <- [1 .. n]]) b ++ computeUnplayableHighCards a
 
 
-computeInvisibleCards :: GameAppearance -> PublicKnowledge -> [Card]
-computeInvisibleCards a k = nub $ ((a ^. fullDeck) `minus` sort (a ^. discardPile)) `minus` (map head . filter ((== 1) . length)  $ k ^.. cardInfo . traversed . traversed . possibleCards)
+computeInvisibleCards :: GameAppearance -> [[CardInfo]] -> [Card]
+computeInvisibleCards a k =
+    nub
+    $ (a ^. fullDeck)
+    `minus` sort (a ^. discardPile)
+    `minus` sort [c | [c] <- k ^.. traversed . traversed . possibleCards]
+    `minus` M.foldMapWithKey (\c n -> [Card {} & color .~ c & number .~ m | m <- [1 .. n]]) (a ^. board)
 
 
 computeUnplayableHighCards :: GameAppearance -> [Card]
 computeUnplayableHighCards a = nubSort . concatMap (\c -> [c & number .~ n | n <- [c ^. number .. 5]]) $ nub (a ^. fullDeck) `minus` nub ((a ^. fullDeck) `minus` sort (a ^. discardPile))
+
+
+computePrivateCardInfo :: GameAppearance -> PublicKnowledge -> [CardInfo]
+computePrivateCardInfo a k = findTrashCards . fst . head . filter (uncurry (==)) . (zip <*> tail) . iterate deleteVisibleCards $ k ^. cardInfo . idx (a ^. myId)
+    where
+        deleteVisibleCards cis = cis <&> possibleCards %~ (\case [c] -> [c]; cs -> intersect cs . computeInvisibleCards a . map snd $ M.toAscList ((a ^. otherHands) <&> (\h -> [CardInfo {} & possibleCards .~ [c] | c <- h]) & at (a ^. myId) ?~ cis))
+        findTrashCards =
+            map (\ci -> case ci ^. possibleCards of {
+                    [c] -> ci & cardTag .~ (if isTrash c then Trash else NoTag);
+                    pc | all isVirtualTrash pc -> ci & cardTag .~ Trash;
+                    _ -> ci
+                }) 
+            where
+                isTrash = memoizeCardList $ computeTrashCards (a ^. board) a
+                isVirtualTrash = memoizeCardList $ computeTrashCards (k ^. virtualBoard) a
 
 
 allHints :: [Hint]
