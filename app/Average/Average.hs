@@ -1,9 +1,10 @@
 import Control.Monad.Writer
 import System.Random.Shuffle
 import Control.Lens
-import Control.Exception.Base
 import System.Environment
 import Control.Parallel.Strategies
+import Control.Exception
+import System.Exit
 
 import Game
 import BaseAI
@@ -15,11 +16,13 @@ playOneGame :: IO Int
 playOneGame = do
     deck <- shuffleM standardDeck
     let s = fst $ runWriter (playGame deck :: Logger (GameState BaseAI))
+    --catch (return $! sum $ s ^. board) (\e -> do { print (e :: SomeException); print deck; exitWith (ExitFailure 1) })
     return . sum $ s ^. board
 
 getAverage :: Int -> IO Double
 getAverage nGames = do
     scores <- (`using` parListChunk 10 rdeepseq) <$> replicateM nGames playOneGame
+    --scores <- replicateM nGames playOneGame
     return $ fromIntegral (sum scores) / fromIntegral nGames
 
 main :: IO ()

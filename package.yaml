@@ -29,6 +29,7 @@ dependencies:
 - monad-loops
 - parallel
 - pretty-terminal
+- vector
 
 library:
   source-dirs: src
