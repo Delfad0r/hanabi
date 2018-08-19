@@ -83,4 +83,4 @@ prettyPrintGameState s = do
     where
         showCard i j = maybe "  " (style (s ^. players . idx i . strategy . publicKnowledge . cardInfo . idx i . idx j) . prettyShow) $ s ^? players . idx i . hand . ix j
         style :: CardInfo -> String -> String
-        style ci = (if 1 == length (ci ^. possibleCards) then P.style P.Bold else id) . (if Trash == ci ^. cardTag then P.style P.Italic else id)
+        style ci = (if 1 == length (ci ^. possibleCards) then P.style P.Bold else id) . (if all (s ^. players . idx 0 . strategy . publicKnowledge . isVirtualTrash) $ ci ^. possibleCards then P.style P.Italic else id)
