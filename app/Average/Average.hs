@@ -5,6 +5,8 @@ import System.Environment
 import Control.Parallel.Strategies
 import Control.Exception
 import System.Exit
+import Data.List
+import Text.Printf
 
 import Game
 import BaseAI
@@ -19,11 +21,12 @@ playOneGame = do
     --catch (return $! sum $ s ^. board) (\e -> do { print (e :: SomeException); print deck; exitWith (ExitFailure 1) })
     return . sum $ s ^. board
 
-getAverage :: Int -> IO Double
-getAverage nGames = do
+printAverage :: Int -> IO ()
+printAverage nGames = do
+    let maxScore = length $ nub standardDeck
     scores <- (`using` parListChunk 10 rdeepseq) <$> replicateM nGames playOneGame
-    --scores <- replicateM nGames playOneGame
-    return $ fromIntegral (sum scores) / fromIntegral nGames
+    printf "average: %f\n" $ (fromIntegral (sum scores) / fromIntegral nGames :: Double)
+    printf "perfect scores: %f%%\n" $ (100 * genericLength (filter (== maxScore) scores) / fromIntegral nGames :: Double)
 
 main :: IO ()
-main = fmap (read . head) getArgs >>= getAverage >>= print
+main = fmap (read . head) getArgs >>= printAverage

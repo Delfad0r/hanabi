@@ -93,6 +93,8 @@ instance Strategy BaseAI where
             trashValueOfCards = zip (map trashValue privateCardInfo) [0 ..]
         logMessage . unlines . zipWith (curry show) [0 ..] $ k ^. cardInfo . idx (a ^. myId)
         logMessage . unlines . zipWith (curry show) [0 ..] $ privateCardInfo
+        logMessage . show $ k ^. virtualBoard
+        logMessage . show $ computeTrashCards (k ^. virtualBoard) a
         case playableCards of
             (i : _) -> do
                 return $ PlayAction {} & cardPos .~ i
@@ -166,7 +168,7 @@ encodeHand k a i =
         numTrash = cardsForHintNumTrash !! colNum
         indicesForHint = selectCardsForHint k i
         cardsForHint = map (\j -> a ^. otherHands . idx i . idx j) indicesForHint
-        trashCards = computeTrashCards (k ^.virtualBoard) a
+        trashCards = computeTrashCards (k ^. virtualBoard) a
 
 --                              0   1   2   3   4   5   6
 cardsForHintNumPlayable =   [   0,  4,  4,  4,  3,  2,  2]
@@ -178,22 +180,6 @@ selectCardsForHint k i = map (negate . snd) $ sort [(ci ^. lastHinted, -j) | j <
 
 ratePublicKnowledge :: PublicKnowledge -> Double
 ratePublicKnowledge _ = 0
-
-
-{-rateTrashValue :: GameAppearance -> PublicKnowledge -> Card -> (Double, Double)
-rateTrashValue a k c
-    | c `member` computeTrashCards (a ^. board) a = (0, 0)
-    | c `member` computeTrashCards (k ^. virtualBoard) a = (0, singleValue)
-    | otherwise = (fromIntegral (highestScore + 1 - (c ^. number)) / fromIntegral ((1 + visibleBonus + 2 * veryVisibleBonus) * 7 ^ (remaining - 1)), singleValue)
-    where
-        singleValue = fromIntegral (highestScore + 1 - (c ^. number)) / (1 + 2 * fromIntegral (veryVisibleBonus - 1) + fromIntegral ((remaining - 1) * (k ^. currTurn)) / 20)
-        filterMyColor = filter $ (== c ^. color) . (^. color)
-        notDiscarded = filterMyColor (a ^. fullDeck) `minus` sort (filterMyColor $ a ^. discardPile)
-        remaining = length $ filter (== c) notDiscarded
-        highestScore = length . takeWhile (== -1) . (zipWith (-) <*> tail) . (0 :) . nub $ map (^. number) notDiscarded
-        visibleBonus = length $ a ^.. otherHands . traversed . traversed . filtered (== c)
-        veryVisibleBonus = length $ k ^.. cardInfo . traversed . traversed . possibleCards . filtered (== [c])
--}
 
 
 computeTrashValue :: GameAppearance -> PublicKnowledge -> Card -> (Double, Double)
@@ -233,14 +219,15 @@ updatePublicKnowledge a e k =
         where
             isTrash = memoizeCardList $ computeTrashCards (a ^. board) a
             isVirtualTrash = memoizeCardList $ computeTrashCards (k ^. virtualBoard) a
-    updateVirtualBoard k = k
+    updateVirtualBoard k =
+        k
+        & virtualBoard .~ (a ^. board)
         & virtualBoard
             %~ fst
             . head
             . filter (uncurry (==))
             . (zip <*> tail)
             . iterate (imap $ \c n -> if [Card {} & number .~ n + 1 & color .~ c] `elem` (k ^.. cardInfo . traversed . traversed . possibleCards) then n + 1 else n)
-        & virtualBoard %~ M.unionWith max (a ^. board)
     updatePublicKnowledgeWithEvent e@DiscardEvent {..} = k & currTurn %~ succ & cardInfo . idx (e ^. playerId) %~ deleteAt (e ^?! cardPos)
     updatePublicKnowledgeWithEvent e@PlayEvent {..} = k & currTurn %~ succ & cardInfo . idx (e ^. playerId) %~ deleteAt (e ^?! cardPos)
     updatePublicKnowledgeWithEvent e@HintEvent {..} =
