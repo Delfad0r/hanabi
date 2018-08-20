@@ -11,10 +11,8 @@
 
 module BaseAI where
 
-
---Tell the exact hand if #possible hands <= 16 (considering only non-trash cards)
---Rate playable card by virtual board if played
---Prune with all combinations
+--TrashValue = 0 if I have two copies of the same card
+--Rate card to play also based on visible (but not known) cards
 
 
 import Control.Applicative
@@ -83,14 +81,17 @@ instance Strategy BaseAI where
             i = a ^. myId
             privateCardInfo = computePrivateCardInfo a k
             pk = k & cardInfo .~ privateCardInfo & \k' -> k' & virtualBoard .~ updateVirtualBoard k' (a ^. board)
-            playableCards = reverse . map fst . sortOn ((\case [c] -> pk ^. virtualBoard . idx (c ^. color) - c ^. number; _ -> -10) . snd) . filter (all (isPlayable $ a ^. board) . snd) . zip [0 ..] $ privateCardInfo ^.. idx i . traversed . possibleCards
+            playableCards = reverse . map fst . sortOn (average . map (\c -> fromIntegral . subtract (c ^. number) . (^. idx (c ^. color)) . updateVirtualBoard pk . (idx (c ^. color) %~ succ) $ a ^. board) . snd) . filter (all (isPlayable $ a ^. board) . snd) . zip [0 ..] $ privateCardInfo ^.. idx i . traversed . possibleCards
             trashValues = memoizeCardFunction $ computeTrashValue a pk
-            trashValue ci = case ci ^. possibleCards of
-                    [c] | c ^. number <= 1 + pk ^. virtualBoard . idx (c ^. color) -> snd $ trashValues c
-                    cs -> sum (map (fst . trashValues) cs) / genericLength cs
-            trashValueOfCards = zip (map trashValue $ privateCardInfo !! i) [0 ..]
+            myKnownCards = sort [(j, c) | (i, [c]) <- imap (\j ci -> (j, ci ^. possibleCards)) $ privateCardInfo !! i, j <- [0 .. a ^. myHandSize], j /= i]
+            trashValues' j c | (j, c) `member` myKnownCards = (0, 0)
+            trashValues' j c = trashValues c
+            trashValue j ci = case ci ^. possibleCards of
+                    [c] | c ^. number <= 1 + pk ^. virtualBoard . idx (c ^. color) -> snd $ trashValues' j c
+                    cs -> sum (map (fst . trashValues' j) cs) / genericLength cs
+            trashValueOfCards = zip (imap trashValue $ privateCardInfo !! i) [0 ..]
         logMessage . unlines . zipWith (curry show) [0 ..] $ k ^. cardInfo . idx i
-        logMessage . unlines . zipWith (curry show) [0 ..] $ privateCardInfo !! i
+        if (a ^. turnsLeft . to isJust) then mapM_ (logMessage . unlines . zipWith (curry show) [0 ..]) privateCardInfo else logMessage . unlines . zipWith (curry show) [0 ..] $ privateCardInfo !! i
         case playableCards of
             (j : _) -> return $ PlayAction {} & cardPos .~ j
             _ -> do
@@ -114,13 +115,20 @@ initPublicKnowledge a =
 autoFixPublicKnowledge :: GameAppearance -> PublicKnowledge -> PublicKnowledge
 autoFixPublicKnowledge a k =
         k
+        & fixLastTurn
         & findFixedPointBy ((==) `on` (^. cardInfo)) prune
         & (\k' -> k' & virtualBoard .~ updateVirtualBoard k' (a ^. board))
         & updateVirtualTrash
     where
-    prune k = k & cardInfo %~ imap (\i cis -> prunePossibleCards ((a ^. fullDeck) `minus` (a ^. discardPile) `minus` (playedCards $ a ^. board) `minus` sort [c | [c] <- k ^.. cardInfo . traversed . indices (/= i) . traverse . possibleCards]) cis)
-    --prune k = k & cardInfo . mapped . mapped . possibleCards %~ (\case {[c] -> [c]; cs -> intersect cs . computeInvisibleCards a $ k ^. cardInfo})
+    prune k = k & cardInfo %~ imap (\i cis -> prunePossibleCards 64 ((a ^. fullDeck) `minus` (a ^. discardPile) `minus` playedCards (a ^. board) `minus` sort [c | [c] <- k ^.. cardInfo . traversed . indices (/= i) . traverse . possibleCards]) cis)
     updateVirtualTrash k = k & isVirtualTrash .~ memoizeCardList (computeTrashCards (k ^. virtualBoard) a)
+    fixLastTurn :: PublicKnowledge -> PublicKnowledge
+    fixLastTurn k | a ^. turnsLeft . to isJust =
+        k
+        & foldr (.) id (M.elems . imap (\i h -> cardInfo . idx i . mapped . possibleCards %~ isect (sort h)) $ a ^. otherHands)
+        & cardInfo . idx (a ^. myId) . mapped . possibleCards %~ isect ((a ^. fullDeck) `minus` sort (a ^. discardPile) `minus` playedCards (a ^. board) `minus` sort (fold $ a ^. otherHands))
+    fixLastTurn k = k
+
 
 updatePublicKnowledgeWithEvent :: GameAppearance -> Event -> PublicKnowledge -> PublicKnowledge
 updatePublicKnowledgeWithEvent a e@DiscardEvent {..} k = k & currTurn %~ succ & cardInfo . idx (e ^. playerId) %~ deleteAt (e ^?! cardPos)
@@ -136,7 +144,8 @@ updatePublicKnowledgeWithEvent a e@HintEvent {..} k =
         updateOnePlayer i
             | i == e ^. playerId = k ^. cardInfo . idx i
             | null cardsForHint = k ^. cardInfo . idx i
-            | [j] <- cardsForHint, u <- k ^. cardInfo . idx i, u ^. idx j . possibleCards . to length <= 16 = u & idx j . possibleCards %~ pure . (!! n')
+            | ps <- map (\j -> k ^. cardInfo . idx i . idx j . possibleCards) cardsForHint, product (map length ps) <= 16 = k ^. cardInfo . idx i & foldr (.) id (zipWith (\j c -> idx j . possibleCards .~ [c]) cardsForHint $ sequence ps !! n')
+            -- | [j] <- cardsForHint, u <- k ^. cardInfo . idx i, u ^. idx j . possibleCards . to length <= 16 = u & idx j . possibleCards %~ pure . (!! n')
             | n' < colNum * numPlayable =
                 let (num, col') = n' `divMod` colNum
                     col = cols !! col'
@@ -164,7 +173,7 @@ updatePublicKnowledgeWithEvent a e@HintEvent {..} k =
         numPlayable = cardsForHintNumPlayable !! colNum
         numTrash = cardsForHintNumTrash !! colNum
 updatePublicKnowledgeWithEvent a e@DrawEvent {..} k = updatePublicKnowledgeWithEvent a (YouDrawEvent {} & playerId .~ (e ^. playerId)) k
-updatePublicKnowledgeWithEvent a e@YouDrawEvent {..} k = k & cardInfo . idx (e ^. playerId) %~ ((CardInfo {} & possibleCards .~ computeInvisibleCards a (k ^. cardInfo) & lastHinted .~ 0) :)
+updatePublicKnowledgeWithEvent a e@YouDrawEvent {..} k = k & cardInfo . idx (e ^. playerId) %~ ((CardInfo {} & possibleCards .~ nub (computeInvisibleCards a (k ^. cardInfo)) & lastHinted .~ 0) :)
 
 
 isValidHint :: Hint -> [Card] -> Bool
@@ -209,7 +218,7 @@ encodeHand :: PublicKnowledge -> GameAppearance -> PlayerId -> Int
 encodeHand k a i =
     case map (\j -> k ^. cardInfo . idx i . idx j . possibleCards) indicesForHint of
         [] -> 0
-        [cs] | length cs <= 16 -> fromJust $ elemIndex (head cardsForHint) cs
+        ps | product (map length ps) <= 16 -> fromJust . elemIndex cardsForHint $ sequence ps
         _ -> case listToMaybe . filter (isPlayable (k ^. virtualBoard) . snd) $ zip [0 .. numPlayable - 1] cardsForHint of
                 Just (j, c) -> colNum * j + fromJust (elemIndex (c ^. color) cols)
                 Nothing -> colNum * numPlayable + fromBase2 (map (k ^. isVirtualTrash) $ take numTrash cardsForHint)
@@ -240,15 +249,15 @@ computeTrashValue a k c
     | k ^. isVirtualTrash $ c = (0, s2)
     | otherwise = (s1, s2)
     where
-        s0 = fromIntegral ((highestScore ^. idx (c ^. color)) + 1 - (c ^. number)) / fromIntegral (5 ^ (remaining c - 1) * 2 ^ visibleAndKnown c)
-        s1 = s0 / fromIntegral (2 ^ visible c)
+        s0 = fromIntegral ((highestScore ^. idx (c ^. color)) + 1 - (c ^. number)) / (5 ^ (remaining c - 1) * 2 ^ visibleAndKnown c)
+        s1 = s0 / (2 ^ visible c)
         s2 = s0 * 0.9 ^ visible c
         isTrash = memoizeCardList $ computeTrashCards (a ^. board) a
         notDiscarded = (a ^. fullDeck) `minus` sort (a ^. discardPile)
         remaining = memoizeCardFreq notDiscarded
         highestScore = M.fromList [(c, length . takeWhile (== -1) . (zipWith (-) <*> tail) . (0 :) . nub . map (^. number) $ filter ((== c) . (^. color)) notDiscarded) | c <- colors]
         visible = memoizeCardFreq . fold $ a ^. otherHands
-        visibleAndKnown = memoizeCardFreq [c | [c] <- (k ^. cardInfo & deleteAt (a ^. myId)) ^.. traversed . traversed . possibleCards]
+        visibleAndKnown = memoizeCardFreq [c | [c] <- k ^. cardInfo ^.. traversed . indices (/= (a ^. myId)) . traversed . possibleCards]
 
 
 cards :: [Card]
@@ -290,7 +299,7 @@ playedCards = M.foldMapWithKey (\c n -> [Card {} & color .~ c & number .~ m | m 
 
 
 updateVirtualBoard :: PublicKnowledge -> Board -> Board
-updateVirtualBoard k b = findFixedPoint (imap $ \c n -> if [Card {} & number .~ n + 1 & color .~ c] `elem` (k ^.. cardInfo . traversed . traversed . possibleCards) then n + 1 else n) b
+updateVirtualBoard k = findFixedPoint (imap $ \c n -> if [Card {} & number .~ n + 1 & color .~ c] `elem` (k ^.. cardInfo . traversed . traversed . possibleCards) then n + 1 else n)
 
 
 computeTrashCards :: Board -> GameAppearance -> [Card]
@@ -299,8 +308,7 @@ computeTrashCards b a = sort $ M.foldMapWithKey (\c n -> [Card {} & number .~ m 
 
 computeInvisibleCards :: GameAppearance -> [[CardInfo]] -> [Card]
 computeInvisibleCards a k =
-    nub
-    $ (a ^. fullDeck)
+    (a ^. fullDeck)
     `minus` sort (a ^. discardPile)
     `minus` sort [c | [c] <- k ^.. traverse . traverse . possibleCards]
     `minus` playedCards (a ^. board)
@@ -314,14 +322,22 @@ computePrivateCardInfo :: GameAppearance -> PublicKnowledge -> [[CardInfo]]
 computePrivateCardInfo a k = findFixedPoint prune $ k ^. cardInfo
     where
         i = a ^. myId
-        prune = (\ciss -> ciss & elements (/= i) %@~ (\j -> prunePossibleCards (invis `minus` sort (fold . M.delete j $ a ^. otherHands) `minus` sort [c | [c] <- ciss ^.. idx i . traversed . possibleCards]))) . (idx i %~ prunePossibleCards (invis `minus` sort (fold $ a ^. otherHands)))
+        prune = (\ciss -> ciss & elements (/= i) %@~ (\j -> prunePossibleCards 128 (invis `minus` sort (fold . M.delete j $ a ^. otherHands) `minus` sort [c | [c] <- ciss ^.. idx i . traversed . possibleCards]))) . (idx i %~ prunePossibleCards 128 (invis `minus` sort (fold $ a ^. otherHands)))
         invis = (a ^. fullDeck) `minus` sort (a ^. discardPile) `minus` playedCards (a ^. board)
 
 
-prunePossibleCards :: [Card] -> [CardInfo] -> [CardInfo]
-prunePossibleCards invis cis = cis & mapped . possibleCards %~ (\case [c] -> [c]; p -> isect p invis')
+prunePossibleCards :: Int -> [Card] -> [CardInfo] -> [CardInfo]
+prunePossibleCards n invis cis = if product (cis' ^.. traversed . possibleCards . to length) <= n then cis' & foldr (.) id (imap (\i p -> idx i . possibleCards .~ p) ps'') else cis'
     where
         invis' = invis `minus` sort [c | [c] <- map (^. possibleCards) cis]
+        cis' = cis <&> possibleCards %~ (\case [c] -> [c]; p -> isect p invis')
+        ps'' = map nubSort . transpose $ computePossibleHands invis cis'
+
+
+computePossibleHands :: [Card] -> [CardInfo] -> [[Card]]
+computePossibleHands invis = filter (all (uncurry ((>=) . invisMemo) . (head &&& length)) . group . sort) . sequence . map (^. possibleCards)
+    where
+        invisMemo = memoizeCardFreq invis
 
 
 allHints :: [Hint]
@@ -340,4 +356,8 @@ findFixedPoint = findFixedPointBy (==)
 
 findFixedPointBy :: (a -> a -> Bool) -> (a -> a) -> a -> a
 findFixedPointBy eq f = fst . head . filter (uncurry eq) . (zip <*> tail) . iterate f
+
+
+average :: (Fractional a) => [a] -> a
+average = liftA2 (/) sum genericLength
 

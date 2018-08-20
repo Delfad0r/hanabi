@@ -28,11 +28,7 @@ main = do
     getLine
     w
     print $ s ^. fullDeck
-    print $ s ^. discardPile
-    print $ s ^. players ^.. traversed . hand
-    print $ s ^. board
     print . sum $ s ^. board
-    print $ s ^. players . idx 0 . strategy . publicKnowledge . virtualBoard
     putStrLn $ s ^. gameOverBecause
     assert (s ^. numLives == 3) $ return ()
 
